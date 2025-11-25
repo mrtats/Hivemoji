@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Hivemoji Uploader</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <div class="title">Hivemoji</div>
+      <div class="subtitle">On-chain emoji via hive-keychain (must fit payload limits)</div>
+    </header>
+
+    <form id="emojiForm">
+      <label class="field">
+        <span>Owner account</span>
+        <input id="owner" name="owner" placeholder="alice" required />
+      </label>
+
+      <label class="field">
+        <span>Emoji name</span>
+        <input
+          id="name"
+          name="name"
+          placeholder="partyblob"
+          pattern="[a-z0-9_]{1,32}"
+          required
+        />
+        <small>Lowercase, digits, underscores; 1-32 chars.</small>
+      </label>
+
+      <label class="field">
+        <span>Operation</span>
+        <select id="operation" name="operation">
+          <option value="register">register</option>
+          <option value="update">update</option>
+          <option value="delete">delete</option>
+        </select>
+      </label>
+
+      <div id="fileFields">
+        <label class="field">
+          <span>Emoji file (PNG/WebP/GIF; keep payload under 8 KB)</span>
+          <input id="file" name="file" type="file" accept="image/png,image/webp,image/gif" />
+        </label>
+
+        <label class="field">
+          <span>Fallback (optional static image)</span>
+          <input
+            id="fallback"
+            name="fallback"
+            type="file"
+            accept="image/png,image/webp,image/gif"
+          />
+        </label>
+
+        <div class="inline">
+          <label><input type="checkbox" id="animated" /> Animated</label>
+          <label><input type="checkbox" id="loop" /> Loop</label>
+        </div>
+      </div>
+
+      <div class="buttons">
+        <button type="button" id="buildBtn">Build payload</button>
+        <button type="submit" id="broadcastBtn">Broadcast via Keychain</button>
+      </div>
+    </form>
+
+    <pre id="payloadDisplay" class="code"></pre>
+    <div id="status"></div>
+
+    <section class="settings">
+      <div class="settings-header">
+        <div>
+          <div class="title small">Renderer settings</div>
+          <div class="subtitle">Sites where :emoji: gets replaced inline.</div>
+        </div>
+      </div>
+      <div class="inline">
+        <input id="hostInput" placeholder="hive.blog" />
+        <button type="button" id="addHostBtn">Add</button>
+      </div>
+      <div id="hostList" class="host-list"></div>
+    </section>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

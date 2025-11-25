@@ -1,0 +1,171 @@
+:root {
+  --bg: #0c0f14;
+  --panel: #141924;
+  --text: #e6edf7;
+  --muted: #9da6b8;
+  --accent: #4de1b1;
+  --border: #1f2634;
+  --error: #ff6b6b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 12px;
+  font-family: "Inter", system-ui, -apple-system, sans-serif;
+  background: radial-gradient(circle at 20% 20%, rgba(77, 225, 177, 0.12), transparent 45%),
+    radial-gradient(circle at 80% 0%, rgba(90, 153, 255, 0.12), transparent 40%),
+    var(--bg);
+  color: var(--text);
+  width: 360px;
+}
+
+header {
+  margin-bottom: 10px;
+}
+
+.title {
+  font-weight: 700;
+  letter-spacing: 0.4px;
+}
+
+.subtitle {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+form {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.35);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+label span {
+  font-size: 13px;
+}
+
+input,
+select,
+button {
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: #0f1320;
+  color: var(--text);
+  padding: 8px;
+  font-size: 14px;
+}
+
+input[type="file"] {
+  padding: 6px;
+}
+
+small {
+  color: var(--muted);
+}
+
+.inline {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 10px;
+  color: var(--muted);
+}
+
+.buttons {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+button {
+  cursor: pointer;
+  flex: 1;
+  background: linear-gradient(135deg, rgba(77, 225, 177, 0.15), rgba(77, 225, 177, 0.02));
+  border-color: rgba(77, 225, 177, 0.5);
+  transition: border 0.2s ease, transform 0.1s ease;
+}
+
+button:hover {
+  border-color: var(--accent);
+}
+
+button:active {
+  transform: translateY(1px);
+}
+
+.code {
+  background: #0f1320;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  max-height: 200px;
+  overflow: auto;
+  margin-top: 12px;
+  font-size: 12px;
+}
+
+#status {
+  margin-top: 8px;
+  font-size: 13px;
+  min-height: 18px;
+}
+
+#status.error {
+  color: var(--error);
+}
+
+#fileFields.hidden {
+  display: none;
+}
+
+.settings {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+.settings-header .title.small {
+  font-size: 13px;
+}
+
+.host-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.host-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 999px;
+  background: #0f1320;
+  border: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.host-chip button {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  padding: 0;
+  width: 16px;
+  height: 16px;
+  line-height: 16px;
+  cursor: pointer;
+}
