@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "Hivemoji Uploader",
+  "version": "0.1.0",
+  "description": "Custom emojis on Hive! (Firefox build)",
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+  "action": {
+    "default_title": "Hivemoji",
+    "default_popup": "popup.html"
+  },
+  "permissions": ["tabs", "storage"],
+  "host_permissions": ["<all_urls>"],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["inpage.js"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "hivemoji@local",
+      "strict_min_version": "109.0"
+    }
+  }
+}

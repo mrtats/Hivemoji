@@ -1,8 +1,9 @@
 (function () {
   const pending = new Map();
 
+  const PROTOCOL_ID = "hivemoji";
   const DEFAULT_HOSTS = ["hive.blog", "peakd.com", "ecency.com"];
-  const EMOJI_REGEX = /:([a-z0-9_]{1,32}):/g;
+  const EMOJI_REGEX = /:([a-z0-9._-]+\/)?([a-z0-9_]{1,32}):/g; // supports :name: and :owner/name:
   const CONTENT_SELECTORS = [
     "article",
     ".markdown-body",
@@ -29,15 +30,84 @@
 	".entry-body",
     "[data-post-body]",
   ];
-  const registryCache = new Map(); // owner -> Promise<{registry, ts}>
+  const registryCache = new Map(); // owner -> {registry, ts} | {promise}
   let pendingElements = new Set();
   let scheduled = false;
   let stylesInjected = false;
+  const ALLOWED_MIMES = ["image/png", "image/webp", "image/gif", "image/jpeg"];
+  const MAX_CHUNK_DATA_BYTES = 4 * 1024;
+  const MAX_TOTAL_BYTES = 100 * 1024;
+  const MAX_CHUNKS = 50;
+  const MEMORY_TTL_MS = 60 * 60 * 1000; // 1h
+  const PERSIST_TTL_MS = 24 * 60 * 60 * 1000; // 24h
+
+  const storageKeyForOwner = (owner) => `hivemoji_registry_${owner}`;
+
+  function readPersistedRegistry(owner) {
+    return new Promise((resolve) => {
+      const key = storageKeyForOwner(owner);
+      chrome.storage.local.get(key, (data) => {
+        if (chrome.runtime.lastError) return resolve(null);
+        const entry = data[key];
+        if (!entry || !Array.isArray(entry.entries)) return resolve(null);
+        resolve({ registry: new Map(entry.entries), ts: Number(entry.ts) || 0 });
+      });
+    });
+  }
+
+  function persistRegistry(owner, registry, ts) {
+    return new Promise((resolve) => {
+      const key = storageKeyForOwner(owner);
+      const payload = { ts, entries: Array.from(registry.entries()) };
+      chrome.storage.local.set({ [key]: payload }, () => resolve());
+    });
+  }
+
+  function base64Size(base64) {
+    const len = base64.length;
+    const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
+    return Math.floor((len * 3) / 4) - padding;
+  }
 
   function base64TooLarge(base64, maxBytes = 6000) {
     if (!base64) return false;
-    const approxBytes = Math.floor((base64.length * 3) / 4);
-    return approxBytes > maxBytes;
+    return base64Size(base64) > maxBytes;
+  }
+
+  function isAllowedMime(mime) {
+    if (!mime) return false;
+    const lower = String(mime).toLowerCase();
+    return ALLOWED_MIMES.some((m) => lower.startsWith(m));
+  }
+
+  function clampPositiveNumber(n, fallback = 32) {
+    const num = Number(n);
+    if (!Number.isFinite(num) || num <= 0) return fallback;
+    return num;
+  }
+
+  function collectEmojiNeeds(text, inferredOwner) {
+    const needs = new Map();
+    if (!text || !text.includes(":")) return needs;
+    EMOJI_REGEX.lastIndex = 0;
+    for (const match of text.matchAll(EMOJI_REGEX)) {
+      const rawOwner = match[1] ? match[1].slice(0, -1) : null; // drop trailing slash
+      const owner = rawOwner || inferredOwner;
+      const name = match[2];
+      if (!owner || !name) continue;
+      const set = needs.get(owner) || new Set();
+      set.add(name);
+      needs.set(owner, set);
+    }
+    return needs;
+  }
+
+  function hasAllNames(registry, names) {
+    if (!names || !names.size) return true;
+    for (const name of names) {
+      if (!registry.has(name)) return false;
+    }
+    return true;
   }
 
   function injectInpage() {
@@ -107,6 +177,16 @@
     return arr;
   }
 
+  function bytesToBase64(bytes) {
+    let binary = "";
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      const chunk = bytes.subarray(i, i + chunkSize);
+      binary += String.fromCharCode(...chunk);
+    }
+    return btoa(binary);
+  }
+
   function selectImage(def, allowAnimation = true) {
     if (allowAnimation && def.animated !== false) return { mime: def.mime, data: def.data, width: def.width, height: def.height };
     if (def.fallback) return { mime: def.fallback.mime, data: def.fallback.data, width: def.width, height: def.height };
@@ -146,77 +226,242 @@
     return img;
   }
 
-  async function fetchRegistry(owner) {
+  async function fetchRegistry(owner, neededNames = null) {
     const now = Date.now();
     const cached = registryCache.get(owner);
-    if (cached && now - cached.ts < 5 * 60 * 1000) return cached.registry;
+    if (cached?.registry && now - cached.ts < MEMORY_TTL_MS && hasAllNames(cached.registry, neededNames)) {
+      return cached.registry;
+    }
+    if (cached?.promise) {
+      const reg = await cached.promise;
+      if (hasAllNames(reg, neededNames)) return reg;
+    }
 
-    const body = {
-      jsonrpc: "2.0",
-      method: "condenser_api.get_account_history",
-      params: [owner, -1, 1000],
-      id: 1,
-    };
-    const res = await fetch("https://api.hive.blog", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const json = await res.json();
-    const history = json.result || [];
-    const registry = new Map();
-    for (const [, opObj] of history) {
-      const op = opObj.op || opObj[1];
-      if (!Array.isArray(op)) continue;
-      const [opName, data] = op;
-      if (opName !== "custom_json") continue;
-      if (data.id !== "hivemoji") continue;
-      let payload;
-      try {
-        payload = typeof data.json === "string" ? JSON.parse(data.json) : data.json;
-      } catch {
-        continue;
-      }
-      if (!payload || payload.version !== 1) continue;
-      if (payload.op === "delete") {
-        registry.set(payload.name, { deleted: true });
-        continue;
-      }
-      if (payload.op === "register" || payload.op === "update") {
-        const width = Number(payload.width);
-        const height = Number(payload.height);
-        if (!payload.data || !payload.mime) continue;
-        if (base64TooLarge(payload.data)) continue;
-        if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) continue;
-        const mime = String(payload.mime).toLowerCase();
-        const allowedMime = mime.startsWith("image/png") || mime.startsWith("image/webp") || mime.startsWith("image/gif") || mime.startsWith("image/jpeg");
-        if (!allowedMime) continue;
-        if (payload.fallback && payload.fallback.mime) {
-          const fbMime = String(payload.fallback.mime).toLowerCase();
-          const fbAllowed =
-            fbMime.startsWith("image/png") ||
-            fbMime.startsWith("image/webp") ||
-            fbMime.startsWith("image/gif") ||
-            fbMime.startsWith("image/jpeg");
-          if (!fbAllowed) continue;
-          if (base64TooLarge(payload.fallback.data)) continue;
+    const promise = (async () => {
+      const persisted = await readPersistedRegistry(owner);
+      const persistedNow = Date.now();
+      let seedRegistry = new Map();
+      if (persisted && persistedNow - persisted.ts < PERSIST_TTL_MS) {
+        if (hasAllNames(persisted.registry, neededNames)) {
+          registryCache.set(owner, { registry: persisted.registry, ts: persisted.ts });
+          return persisted.registry;
         }
-        registry.set(payload.name, {
-          owner,
-          name: payload.name,
-          mime,
-          width,
-          height,
-          animated: payload.animated,
-          loop: payload.loop,
-          data: payload.data,
-          fallback: payload.fallback,
-          deleted: false,
+        seedRegistry = persisted.registry;
+      } else if (cached?.registry) {
+        seedRegistry = cached.registry;
+      }
+
+      let history = [];
+      try {
+        const body = {
+          jsonrpc: "2.0",
+          method: "condenser_api.get_account_history",
+          params: [owner, -1, 1000],
+          id: 1,
+        };
+        const res = await fetch("https://api.hive.blog", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const json = await res.json();
+        history = (json.result || []).slice().sort((a, b) => {
+          const ai = Array.isArray(a) ? a[0] : a?.[0] ?? 0;
+          const bi = Array.isArray(b) ? b[0] : b?.[0] ?? 0;
+          return ai - bi;
+        });
+      } catch {
+        // ignore and fall back to cache
+      }
+
+      if (!history.length && seedRegistry.size) {
+        registryCache.set(owner, { registry: seedRegistry, ts: persisted?.ts || now });
+        return seedRegistry;
+      }
+      const registry = new Map(seedRegistry);
+      const chunkGroups = new Map();
+      let opIndex = 0;
+
+      const recordEntry = (name, entry) => {
+        const existing = registry.get(name);
+        if (!existing || (entry.__seq || 0) >= (existing.__seq || 0)) {
+          registry.set(name, entry);
+        }
+      };
+
+      for (const [, opObj] of history) {
+        opIndex += 1;
+        const op = opObj.op || opObj[1];
+        if (!Array.isArray(op)) continue;
+        const [opName, data] = op;
+        if (opName !== "custom_json") continue;
+        if (data.id !== "hivemoji") continue;
+        let payload;
+        try {
+          payload = typeof data.json === "string" ? JSON.parse(data.json) : data.json;
+        } catch {
+          continue;
+        }
+        if (!payload || (payload.version !== 1 && payload.version !== 2)) continue;
+
+        // v1 payloads
+        if (payload.version === 1) {
+          if (payload.op === "delete") {
+            recordEntry(payload.name, { deleted: true, __seq: opIndex });
+            continue;
+          }
+          if (payload.op === "register") {
+            const width = Number(payload.width);
+            const height = Number(payload.height);
+            if (!payload.data || !payload.mime) continue;
+            if (base64TooLarge(payload.data)) continue;
+            if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) continue;
+            if (!isAllowedMime(payload.mime)) continue;
+            if (payload.fallback && payload.fallback.mime) {
+              if (!isAllowedMime(payload.fallback.mime)) continue;
+              if (base64TooLarge(payload.fallback.data)) continue;
+            }
+            recordEntry(payload.name, {
+              owner,
+              name: payload.name,
+              mime: payload.mime,
+              width,
+              height,
+              animated: payload.animated,
+              loop: payload.loop,
+              data: payload.data,
+              fallback: payload.fallback,
+              deleted: false,
+              __seq: opIndex,
+            });
+          }
+          continue;
+        }
+
+        // v2 chunked payloads
+        if (payload.op === "delete") {
+          recordEntry(payload.name, { deleted: true, __seq: opIndex });
+          continue;
+        }
+        if (payload.op !== "chunk") continue;
+        if (!payload.data || !payload.mime) continue;
+        if (!isAllowedMime(payload.mime)) continue;
+        if (base64TooLarge(payload.data, MAX_CHUNK_DATA_BYTES)) continue;
+        const width = clampPositiveNumber(payload.width);
+        const height = clampPositiveNumber(payload.height);
+        const total = Number(payload.total);
+        const seq = Number(payload.seq);
+        if (!Number.isInteger(total) || !Number.isInteger(seq) || total <= 0 || total > MAX_CHUNKS || seq < 0 || seq >= total) continue;
+
+        const keyBase = payload.id || `${owner}-${payload.name}`;
+        const kind = payload.kind === "fallback" ? "fallback" : "main";
+        const chunkKey = `${keyBase}:${kind}`;
+        const checksum = payload.checksum ? String(payload.checksum).toLowerCase() : undefined;
+        const group =
+          chunkGroups.get(chunkKey) ||
+          (() => {
+            const g = {
+              name: payload.name,
+              mime: payload.mime,
+              width,
+              height,
+              animated: payload.animated,
+              loop: payload.loop,
+              checksum,
+              total,
+              kind,
+              chunks: new Map(),
+              __seq: opIndex,
+            };
+            chunkGroups.set(chunkKey, g);
+            return g;
+          })();
+
+        if (group.mime !== payload.mime || group.width !== width || group.height !== height) continue;
+        group.total = total;
+        group.__seq = Math.max(group.__seq, opIndex);
+        group.chunks.set(seq, payload.data);
+      }
+
+      async function buildFromChunks() {
+        const fallbackForName = new Map();
+
+        const checksumMatches = async (bytes, checksum) => {
+          if (!checksum) return true;
+          if (!crypto?.subtle) return true;
+          try {
+            const digest = await crypto.subtle.digest("SHA-256", bytes);
+            const hashArray = Array.from(new Uint8Array(digest));
+            const hex = hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+            return hex === checksum.toLowerCase();
+          } catch {
+            return false;
+          }
+        };
+
+        for (const group of chunkGroups.values()) {
+          if (group.chunks.size !== group.total) continue;
+          const ordered = [];
+          let complete = true;
+          for (let i = 0; i < group.total; i++) {
+            const c = group.chunks.get(i);
+            if (!c) {
+              complete = false;
+              break;
+            }
+            ordered.push(c);
+          }
+          if (!complete) continue;
+          const bytesArray = ordered.map((b64) => base64ToBytes(b64));
+          const totalBytes = bytesArray.reduce((sum, arr) => sum + arr.length, 0);
+          if (totalBytes > MAX_TOTAL_BYTES) continue;
+          const merged = new Uint8Array(totalBytes);
+          let offset = 0;
+          for (const arr of bytesArray) {
+            merged.set(arr, offset);
+            offset += arr.length;
+          }
+          if (!(await checksumMatches(merged, group.checksum))) continue;
+          const data = bytesToBase64(merged);
+          const entry = {
+            owner,
+            name: group.name,
+            mime: group.mime,
+            width: group.width,
+            height: group.height,
+            animated: group.animated,
+            loop: group.loop,
+            data,
+            deleted: false,
+            __seq: group.__seq,
+          };
+          if (group.kind === "fallback") {
+            fallbackForName.set(group.name, entry);
+          } else {
+            recordEntry(group.name, entry);
+          }
+        }
+
+        fallbackForName.forEach((fb, name) => {
+          const main = registry.get(name);
+          if (main && (fb.__seq || 0) >= (main.fallback?.__seq || 0)) {
+            main.fallback = { mime: fb.mime, data: fb.data, __seq: fb.__seq };
+          }
         });
       }
-    }
-    registryCache.set(owner, { registry, ts: now });
-    return registry;
+
+      await buildFromChunks();
+      const ts = Date.now();
+      registryCache.set(owner, { registry, ts });
+      await persistRegistry(owner, registry, ts);
+      return registry;
+    })().catch((err) => {
+      registryCache.delete(owner);
+      throw err;
+    });
+
+    registryCache.set(owner, { promise });
+    return promise;
   }
 
   function inferOwner(node) {
@@ -260,15 +505,19 @@
     return null;
   }
 
-  function replaceTextNode(node, registry) {
+  function replaceTextNode(node, registries, defaultOwner) {
     const text = node.textContent;
     if (!text || !text.includes(":")) return;
     let changed = false;
     const frag = document.createDocumentFragment();
     let lastIndex = 0;
+    EMOJI_REGEX.lastIndex = 0;
     for (const match of text.matchAll(EMOJI_REGEX)) {
-      const [full, name] = match;
-      const def = registry.get(name);
+      const [full, ownerPart, name] = match;
+      const owner = ownerPart ? ownerPart.slice(0, -1) : defaultOwner;
+      if (!owner) continue;
+      const registry = registries.get(owner);
+      const def = registry?.get(name);
       if (!def || def.deleted) continue;
       const before = text.slice(lastIndex, match.index);
       if (before) frag.appendChild(document.createTextNode(before));
@@ -293,18 +542,26 @@
 
   async function processElement(el) {
     const owner = inferOwner(el);
-    if (!owner) return;
-    if (!el || !el.textContent || !el.textContent.includes(":")) return;
-    let registry;
+    if (!owner && !el?.textContent?.includes(":")) return;
+    const needs = collectEmojiNeeds(el?.textContent || "", owner);
+    if (!needs.size) return;
+    const registries = new Map();
     try {
-      registry = await fetchRegistry(owner);
+      await Promise.all(
+        Array.from(needs.entries()).map(async ([own, names]) => {
+          const reg = await fetchRegistry(own, names);
+          registries.set(own, reg);
+        })
+      );
     } catch (err) {
-      // ignore fetch errors
       return;
     }
     const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
-        if (!node.nodeValue || !node.nodeValue.includes(":")) return NodeFilter.FILTER_SKIP;
+        const value = node.nodeValue;
+        if (!value || !value.includes(":")) return NodeFilter.FILTER_SKIP;
+        EMOJI_REGEX.lastIndex = 0;
+        if (!EMOJI_REGEX.test(value)) return NodeFilter.FILTER_SKIP;
         const parent = node.parentElement;
         if (!parent || /^(script|style|textarea|code|pre|input)$/i.test(parent.tagName)) {
           return NodeFilter.FILTER_SKIP;
@@ -314,7 +571,7 @@
     });
     const nodes = [];
     while (walker.nextNode()) nodes.push(walker.currentNode);
-    nodes.forEach((n) => replaceTextNode(n, registry));
+    nodes.forEach((n) => replaceTextNode(n, registries, owner));
   }
 
   function scheduleProcess(el) {
@@ -369,7 +626,8 @@
 
   async function runRendererIfAllowed() {
     const host = location.hostname;
-    chrome.storage.sync.get({ hivemojiHosts: DEFAULT_HOSTS }, (data) => {
+    const storage = (chrome.storage && chrome.storage.sync) || chrome.storage.local;
+    storage.get({ hivemojiHosts: DEFAULT_HOSTS }, (data = {}) => {
       const allowed = data.hivemojiHosts || DEFAULT_HOSTS;
       const allowedMatch = allowed.some((h) => host === h || host.endsWith(`.${h}`));
       if (!allowedMatch) return;

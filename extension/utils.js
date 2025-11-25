@@ -1,7 +1,7 @@
 export const PROTOCOL_ID = "hivemoji";
 export const PROTOCOL_VERSION = 1;
 export const MAX_JSON_BYTES = 8 * 1024;
-export const SAFE_IMAGE_BYTES = 5 * 1024;
+export const SAFE_IMAGE_BYTES = 120 * 1024; // allow larger files; chunking will be applied client-side if needed
 export const NAME_REGEX = /^[a-z0-9_]{1,32}$/;
 
 export function validateName(name) {
@@ -144,7 +144,7 @@ export async function readImageFile(file) {
   const buffer = new Uint8Array(await file.arrayBuffer());
   if (buffer.length > SAFE_IMAGE_BYTES) {
     throw new Error(
-      `Raw image is ${buffer.length} bytes; keep it <= ${SAFE_IMAGE_BYTES} to stay under custom_json limits`
+      `Raw image is ${buffer.length} bytes; keep it <= ${SAFE_IMAGE_BYTES} bytes (chunking will handle large payloads).`
     );
   }
 
@@ -157,5 +157,5 @@ export async function readImageFile(file) {
   }
 
   const data = arrayBufferToBase64(buffer);
-  return { ...info, data, bytes: buffer.length };
+  return { ...info, data, bytes: buffer.length, buffer };
 }

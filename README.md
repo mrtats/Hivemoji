@@ -6,7 +6,7 @@ On-chain custom emoji protocol tools for Hive. Ships a Chrome extension uploader
 
 - Validates PNG/WebP/GIF/APNG images and base64-encodes them for Hive `custom_json`.
 - Chrome extension can also render `:emoji:` inline on allowed sites (defaults: hive.blog, peakd.com, ecency.com) by fetching on-chain definitions.
-- Indexer to consume `custom_json` ops with `id="hivemoji"` and build an `(owner,name)` registry.
+- Indexer to consume `custom_json` ops with `id="hivemoji"` and build an `(owner,name)` registry (supports v1 and chunked v2).
 - Renderer that replaces `:name:` tokens in post bodies with `<img src="data:...">` using on-chain bytes only.
 
 ## Chrome Extension (Hive Keychain)
@@ -14,7 +14,7 @@ On-chain custom emoji protocol tools for Hive. Ships a Chrome extension uploader
 1) Install the official Hive Keychain browser extension and ensure you are logged in.
 2) In Chrome/Brave: `chrome://extensions` -> toggle Developer Mode -> "Load unpacked" -> select the `extension` folder in this repo.
 3) Pin "Hivemoji Uploader". Open it while you're on any normal web page (Keychain injects per page).
-4) Fill in owner, emoji name, choose `register/update/delete`, attach a 32x32 PNG/WebP/GIF, optionally set animated/loop and fallback.
+4) Fill in owner, emoji name, choose `register/delete`, attach a 32x32 PNG/WebP/GIF, optionally set animated/loop and fallback.
 5) Click "Broadcast via Keychain". The payload is validated for size/format; Keychain prompts you to sign a `custom_json` with `id=hivemoji`.
 
 Notes:
@@ -27,10 +27,30 @@ Notes:
 ## Protocol (v1)
 
 - `custom_json.id`: `hivemoji`
-- Shared fields: `op` (`register` | `update` | `delete`), `version` (`1`), `name` (`[a-z0-9_]{1,32}`)
-- Register/update fields: `mime`, `width` (`32`), `height` (`32`), `data` (base64 image bytes), optional `animated`, `loop`, `fallback { mime, data }`.
+- Shared fields: `op` (`register` | `delete`), `version` (`1`), `name` (`[a-z0-9_]{1,32}`)
+- Register fields: `mime`, `width`, `height`, `data` (base64 image bytes), optional `animated`, `loop`, `fallback { mime, data }`.
 - Delete fields: `op: "delete"`, `name`.
 - Payload size: defensive cap of `<= 8 KB` JSON string; raw image size recommended `<= 5 KB` before base64.
+
+## Protocol (v2, chunked)
+
+- `custom_json.id`: `hivemoji`
+- `op`: `"chunk"` for all data-bearing payloads; optional separate `"register"` manifest for discovery.
+- Shared fields: `version: 2`, `id` (upload id), `name`, `mime`, `width`, `height`, optional `animated`, `loop`, `checksum` (SHA-256 hex over reconstructed bytes), `kind` (`main` | `fallback`).
+- Chunking: `seq`/`total` with raw bytes base64-encoded per chunk (~4 KB of raw bytes each). Renderer reassembles, verifies checksum if present, and stitches fallbacks when provided.
+- Limits (extension defaults): max 50 chunks, ~100 KB total.
+
+## Renderer fetching & caching
+
+- Source: `condenser_api.get_account_history` per author; entries are filtered client-side for `id="hivemoji"`. No HAFSQL dependency.
+- Emoji-scoped fetch: only runs when a post contains `:name:` tokens (or `:owner/name:` to reference another account’s namespace); when cache is populated, only missing emoji names are refetched unless the cache is stale/empty.
+- Caching: per-owner registries cached in-memory for 1 hour and persisted via `chrome.storage.local` for 24 hours. In-flight fetches are deduped.
+
+## Firefox Extension (Hive Keychain)
+
+- Firefox MV3 build is provided at `extension/manifest.firefox.json`.
+- Load temporarily via `about:debugging` -> "This Firefox" -> "Load Temporary Add-on..." and pick `manifest.firefox.json`.
+- Same UI/behavior as Chrome: requires the Hive Keychain extension (Firefox edition) to be installed and logged in.
 
 ## Notes
 
