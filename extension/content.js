@@ -35,9 +35,8 @@
   let scheduled = false;
   let stylesInjected = false;
   const ALLOWED_MIMES = ["image/png", "image/webp", "image/gif", "image/jpeg"];
-  const MAX_CHUNK_DATA_BYTES = 4 * 1024;
-  const MAX_TOTAL_BYTES = 100 * 1024;
-  const MAX_CHUNKS = 50;
+  const API_BASE_URL = "https://hivemoji.hivelytics.io";
+  const MAX_EMOJI_BYTES = 100 * 1024;
   const MEMORY_TTL_MS = 60 * 60 * 1000; // 1h
   const PERSIST_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 
@@ -169,22 +168,40 @@
     return CONTENT_SELECTORS.flatMap((sel) => Array.from(root.querySelectorAll(sel)));
   }
 
-  function base64ToBytes(base64) {
-    const bin = atob(base64);
-    const len = bin.length;
-    const arr = new Uint8Array(len);
-    for (let i = 0; i < len; i++) arr[i] = bin.charCodeAt(i);
-    return arr;
+  function fetchViaBackground(url) {
+    return new Promise((resolve) => {
+      if (!chrome?.runtime?.id || !chrome.runtime?.sendMessage) return resolve(null);
+      try {
+        chrome.runtime.sendMessage({ type: "HIVEMOJI_FETCH_JSON", url }, (response) => {
+          if (chrome.runtime.lastError) {
+            return resolve({ error: chrome.runtime.lastError.message });
+          }
+          resolve(response || null);
+        });
+      } catch {
+        resolve(null);
+      }
+    });
   }
 
-  function bytesToBase64(bytes) {
-    let binary = "";
-    const chunkSize = 0x8000;
-    for (let i = 0; i < bytes.length; i += chunkSize) {
-      const chunk = bytes.subarray(i, i + chunkSize);
-      binary += String.fromCharCode(...chunk);
+  async function fetchJson(url) {
+    const bg = await fetchViaBackground(url);
+    if (bg) {
+      if (bg.error) throw new Error(bg.error);
+      if (!bg.ok) throw new Error(`API responded with ${bg.status || "error"}`);
+      if (bg.json !== undefined) return bg.json;
+      if (bg.text) {
+        try {
+          return JSON.parse(bg.text);
+        } catch (err) {
+          throw new Error("Failed to parse API response");
+        }
+      }
+      throw new Error("Empty API response");
     }
-    return btoa(binary);
+    const res = await fetch(url, { credentials: "omit", cache: "no-store" });
+    if (!res.ok) throw new Error(`API responded with ${res.status}`);
+    return res.json();
   }
 
   function selectImage(def, allowAnimation = true) {
@@ -251,206 +268,51 @@
         seedRegistry = cached.registry;
       }
 
-      let history = [];
+      let emojis = [];
       try {
-        const body = {
-          jsonrpc: "2.0",
-          method: "condenser_api.get_account_history",
-          params: [owner, -1, 1000],
-          id: 1,
-        };
-        const res = await fetch("https://api.hive.blog", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        const json = await res.json();
-        history = (json.result || []).slice().sort((a, b) => {
-          const ai = Array.isArray(a) ? a[0] : a?.[0] ?? 0;
-          const bi = Array.isArray(b) ? b[0] : b?.[0] ?? 0;
-          return ai - bi;
-        });
-      } catch {
-        // ignore and fall back to cache
-      }
-
-      if (!history.length && seedRegistry.size) {
-        registryCache.set(owner, { registry: seedRegistry, ts: persisted?.ts || now });
-        return seedRegistry;
-      }
-      const registry = new Map(seedRegistry);
-      const chunkGroups = new Map();
-      let opIndex = 0;
-
-      const recordEntry = (name, entry) => {
-        const existing = registry.get(name);
-        if (!existing || (entry.__seq || 0) >= (existing.__seq || 0)) {
-          registry.set(name, entry);
+        const json = await fetchJson(`${API_BASE_URL}/api/authors/${encodeURIComponent(owner)}/emojis?with_data=1`);
+        if (Array.isArray(json)) {
+          emojis = json;
         }
+      } catch {
+        if (seedRegistry.size && hasAllNames(seedRegistry, neededNames)) {
+          registryCache.set(owner, { registry: seedRegistry, ts: persisted?.ts || now });
+          return seedRegistry;
+        }
+        throw new Error("Failed to fetch hivemoji registry");
+      }
+
+      const registry = new Map(seedRegistry);
+      const normalizeFallback = (emoji) => {
+        const fallbackData = emoji.fallback_data || emoji.fallbackData;
+        const fallbackMime = emoji.fallback_mime || emoji.fallbackMime;
+        if (!fallbackData) return null;
+        if (fallbackMime && !isAllowedMime(fallbackMime)) return null;
+        if (base64TooLarge(fallbackData, MAX_EMOJI_BYTES)) return null;
+        return { mime: fallbackMime || emoji.mime, data: fallbackData };
       };
 
-      for (const [, opObj] of history) {
-        opIndex += 1;
-        const op = opObj.op || opObj[1];
-        if (!Array.isArray(op)) continue;
-        const [opName, data] = op;
-        if (opName !== "custom_json") continue;
-        if (data.id !== "hivemoji") continue;
-        let payload;
-        try {
-          payload = typeof data.json === "string" ? JSON.parse(data.json) : data.json;
-        } catch {
-          continue;
-        }
-        if (!payload || (payload.version !== 1 && payload.version !== 2)) continue;
-
-        // v1 payloads
-        if (payload.version === 1) {
-          if (payload.op === "delete") {
-            recordEntry(payload.name, { deleted: true, __seq: opIndex });
-            continue;
-          }
-          if (payload.op === "register") {
-            const width = Number(payload.width);
-            const height = Number(payload.height);
-            if (!payload.data || !payload.mime) continue;
-            if (base64TooLarge(payload.data)) continue;
-            if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) continue;
-            if (!isAllowedMime(payload.mime)) continue;
-            if (payload.fallback && payload.fallback.mime) {
-              if (!isAllowedMime(payload.fallback.mime)) continue;
-              if (base64TooLarge(payload.fallback.data)) continue;
-            }
-            recordEntry(payload.name, {
-              owner,
-              name: payload.name,
-              mime: payload.mime,
-              width,
-              height,
-              animated: payload.animated,
-              loop: payload.loop,
-              data: payload.data,
-              fallback: payload.fallback,
-              deleted: false,
-              __seq: opIndex,
-            });
-          }
-          continue;
-        }
-
-        // v2 chunked payloads
-        if (payload.op === "delete") {
-          recordEntry(payload.name, { deleted: true, __seq: opIndex });
-          continue;
-        }
-        if (payload.op !== "chunk") continue;
-        if (!payload.data || !payload.mime) continue;
-        if (!isAllowedMime(payload.mime)) continue;
-        if (base64TooLarge(payload.data, MAX_CHUNK_DATA_BYTES)) continue;
-        const width = clampPositiveNumber(payload.width);
-        const height = clampPositiveNumber(payload.height);
-        const total = Number(payload.total);
-        const seq = Number(payload.seq);
-        if (!Number.isInteger(total) || !Number.isInteger(seq) || total <= 0 || total > MAX_CHUNKS || seq < 0 || seq >= total) continue;
-
-        const keyBase = payload.id || `${owner}-${payload.name}`;
-        const kind = payload.kind === "fallback" ? "fallback" : "main";
-        const chunkKey = `${keyBase}:${kind}`;
-        const checksum = payload.checksum ? String(payload.checksum).toLowerCase() : undefined;
-        const group =
-          chunkGroups.get(chunkKey) ||
-          (() => {
-            const g = {
-              name: payload.name,
-              mime: payload.mime,
-              width,
-              height,
-              animated: payload.animated,
-              loop: payload.loop,
-              checksum,
-              total,
-              kind,
-              chunks: new Map(),
-              __seq: opIndex,
-            };
-            chunkGroups.set(chunkKey, g);
-            return g;
-          })();
-
-        if (group.mime !== payload.mime || group.width !== width || group.height !== height) continue;
-        group.total = total;
-        group.__seq = Math.max(group.__seq, opIndex);
-        group.chunks.set(seq, payload.data);
-      }
-
-      async function buildFromChunks() {
-        const fallbackForName = new Map();
-
-        const checksumMatches = async (bytes, checksum) => {
-          if (!checksum) return true;
-          if (!crypto?.subtle) return true;
-          try {
-            const digest = await crypto.subtle.digest("SHA-256", bytes);
-            const hashArray = Array.from(new Uint8Array(digest));
-            const hex = hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
-            return hex === checksum.toLowerCase();
-          } catch {
-            return false;
-          }
+      emojis.forEach((emoji) => {
+        if (!emoji?.name || !emoji?.mime || !emoji?.data) return;
+        if (!isAllowedMime(emoji.mime)) return;
+        if (base64TooLarge(emoji.data, MAX_EMOJI_BYTES)) return;
+        const width = clampPositiveNumber(emoji.width, 32);
+        const height = clampPositiveNumber(emoji.height, 32);
+        const entry = {
+          owner: emoji.author || owner,
+          name: emoji.name,
+          mime: emoji.mime,
+          width,
+          height,
+          animated: emoji.animated,
+          loop: emoji.loop,
+          data: emoji.data,
+          fallback: normalizeFallback(emoji) || undefined,
+          deleted: false,
         };
+        registry.set(emoji.name, entry);
+      });
 
-        for (const group of chunkGroups.values()) {
-          if (group.chunks.size !== group.total) continue;
-          const ordered = [];
-          let complete = true;
-          for (let i = 0; i < group.total; i++) {
-            const c = group.chunks.get(i);
-            if (!c) {
-              complete = false;
-              break;
-            }
-            ordered.push(c);
-          }
-          if (!complete) continue;
-          const bytesArray = ordered.map((b64) => base64ToBytes(b64));
-          const totalBytes = bytesArray.reduce((sum, arr) => sum + arr.length, 0);
-          if (totalBytes > MAX_TOTAL_BYTES) continue;
-          const merged = new Uint8Array(totalBytes);
-          let offset = 0;
-          for (const arr of bytesArray) {
-            merged.set(arr, offset);
-            offset += arr.length;
-          }
-          if (!(await checksumMatches(merged, group.checksum))) continue;
-          const data = bytesToBase64(merged);
-          const entry = {
-            owner,
-            name: group.name,
-            mime: group.mime,
-            width: group.width,
-            height: group.height,
-            animated: group.animated,
-            loop: group.loop,
-            data,
-            deleted: false,
-            __seq: group.__seq,
-          };
-          if (group.kind === "fallback") {
-            fallbackForName.set(group.name, entry);
-          } else {
-            recordEntry(group.name, entry);
-          }
-        }
-
-        fallbackForName.forEach((fb, name) => {
-          const main = registry.get(name);
-          if (main && (fb.__seq || 0) >= (main.fallback?.__seq || 0)) {
-            main.fallback = { mime: fb.mime, data: fb.data, __seq: fb.__seq };
-          }
-        });
-      }
-
-      await buildFromChunks();
       const ts = Date.now();
       registryCache.set(owner, { registry, ts });
       await persistRegistry(owner, registry, ts);
