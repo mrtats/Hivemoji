@@ -1,6 +1,25 @@
 (function () {
   const API_BASE_URL = "https://hivemoji.hivelytics.io";
 
+  function openUploaderTab() {
+    const url = chrome.runtime.getURL("popup.html");
+    const createTab = chrome.tabs?.create || chrome.browser?.tabs?.create;
+    if (createTab) createTab({ url });
+  }
+
+  try {
+    const manifest = chrome.runtime.getManifest?.();
+    const hasPopup =
+      !!(manifest?.action && manifest.action.default_popup) ||
+      !!(manifest?.browser_action && manifest.browser_action.default_popup);
+    const actionApi = chrome.action || chrome.browserAction;
+    if (!hasPopup && actionApi?.onClicked?.addListener) {
+      actionApi.onClicked.addListener(() => openUploaderTab());
+    }
+  } catch {
+    // ignore
+  }
+
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!message || message.type !== "HIVEMOJI_FETCH_JSON") return;
     const url = String(message.url || "");

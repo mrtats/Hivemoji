@@ -155,7 +155,7 @@ async function buildPayload({ opOverride } = {}) {
         height: img.height,
         animated,
         loop,
-        seq: i,
+        seq: i + 1,
         total,
         data: dataB64,
         kind: kind === "fallback" ? "fallback" : "main",
